@@ -290,6 +290,7 @@ local IS_WINDOWS = ffi.os == "Windows"
 
 local cfg = {}
 local last_key -- path|mtime|size|settings of the last save shown
+local last_skipped -- same, for the last save that couldn't be read (logged once)
 local last_text = {}
 
 if IS_WINDOWS then
@@ -379,16 +380,18 @@ local function read_file(path)
 	return s
 end
 
+-- Returns false if the source doesn't exist (yet), so the caller retries on the next tick.
 local function set_text(source_name, text)
-	if not source_name or source_name == "" or last_text[source_name] == text then return end
+	if not source_name or source_name == "" or last_text[source_name] == text then return true end
 	local src = obs.obs_get_source_by_name(source_name)
-	if not src then return end
+	if not src then return false end
 	local data = obs.obs_data_create()
 	obs.obs_data_set_string(data, "text", text)
 	obs.obs_source_update(src, data)
 	obs.obs_data_release(data)
 	obs.obs_source_release(src)
 	last_text[source_name] = text
+	return true
 end
 
 local function refresh(force)
@@ -400,7 +403,10 @@ local function refresh(force)
 
 	local save, err = Core.parse(read_file(path) or "", cfg.include_party)
 	if not save then
-		print("[shiny counter] skipped " .. path .. ": " .. tostring(err))
+		if key ~= last_skipped then
+			print("[shiny counter] skipped " .. path .. ": " .. tostring(err))
+			last_skipped = key
+		end
 		return -- keep the last good numbers; retry next tick
 	end
 	local game = cfg.game == "auto" and save.game or cfg.game
@@ -415,9 +421,12 @@ local function refresh(force)
 	for _, n in ipairs(r.missing_list) do missing_names[#missing_names + 1] = NAMES[n] end
 	local extra = { file = path:match("[^\\/]+$"), boxed = save.boxed, party = save.party,
 		evolve_names = table.concat(evolve_names, ", "), missing_names = table.concat(missing_names, ", ") }
-	set_text(cfg.main_source, Core.format(cfg.main_format, r, extra))
-	set_text(cfg.evolve_source, Core.format(cfg.evolve_format, r, extra))
-	last_key = key
+	local ok_main = set_text(cfg.main_source, Core.format(cfg.main_format, r, extra))
+	local ok_evolve = set_text(cfg.evolve_source, Core.format(cfg.evolve_format, r, extra))
+	if ok_main and ok_evolve then
+		last_key = key
+		print(string.format("[shiny counter] %s: %d / %d (%d to evolve)", extra.file, r.x, r.y, r.evolve))
+	end
 end
 
 local function tick() refresh(false) end
